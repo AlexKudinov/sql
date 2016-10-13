@@ -1,0 +1,67 @@
+﻿-- често взял  из http://www.sql.ru/blogs/decolores/361 
+
+USE [Имя Базы]
+set nocount on
+declare @idx table(
+	objnname sysname,
+	schname sysname,
+	index_id int, 
+	partition_number int,
+	currentSize bigint,
+	compSize bigint,
+	ScurrentSize bigint,
+	ScompSize bigint)
+
+declare 
+	@sql varchar(max), 
+	@tn varchar(128), 
+	@sn varchar(128), 
+	@oid int, 
+	@iid int
+	
+declare c cursor local fast_forward for
+	select object_schema_name(object_id), object_name(object_id), t.[object_id]
+	from sys.tables t with(nolock)
+	where t.[type] = 'U'
+	order by object_schema_name(object_id), object_name(object_id)
+open c
+while 1=1
+begin
+	fetch next from c into @sn, @tn, @oid
+	if @@FETCH_STATUS <> 0 break
+	raiserror('%s.%s', 10, 1, @sn, @tn) with nowait
+	
+	-- Получаем оценку эффективности сжатия индексов
+	insert into @idx
+	exec sp_estimate_data_compression_savings @sn, @tn, NULL, NULL, 'PAGE' ;
+	
+	declare ic cursor local fast_forward for
+		select si.name, si.index_id
+		from @idx i
+		inner join sys.indexes si
+			on si.[object_id] = @oid
+			and si.index_id = i.index_id
+		-- Не сжимаем то, что плохо сжимается
+		where i.ScurrentSize > i.ScompSize*1.3
+		-- Не сжимаем маленькие индексы и таблицы
+		and i.currentSize > 10000 -- >10Mb
+	open ic
+	declare @index varchar(128)
+	while 1=1
+	begin
+		fetch next from ic into @index, @iid
+		if @@FETCH_STATUS <> 0 break 
+		print @iid
+		-- Если index_id > 0, то это индекс
+		if @iid > 0 
+			set @sql = 'alter index ['+ @index +'] on ['+ @sn +'].[' +@tn +'] rebuild with(data_compression=page)'
+		-- Если index_id = 0, то это "куча"
+		else 
+			set @sql = 'alter table ['+ @sn +'].['+ @tn+ '] rebuild with(data_compression=page)'
+		raiserror('%s', 10, 1, @sql) with nowait
+		exec(@sql)
+	end
+	close ic
+	deallocate ic 
+	delete from @idx
+end
